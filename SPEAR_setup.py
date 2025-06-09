@@ -5,9 +5,11 @@ import glob
 
 
 home_dir="/home/Feiyu.Lu/Documents/SPEAR_ECDA/"
+vftmp_dir="/vftmp/Feiyu.Lu/"
+arch_dir="/archive/Feiyu.Lu/"
 
 class Exp:
-    def __init__(self, dict):
+    def __init__(self, dict, read_ens=False):
         """
         Initialize the experiment class with the given parameters.
         """
@@ -30,21 +32,29 @@ class Exp:
         self.exp_dir='/archive/{}/SPEAR/{}/{}'.format(self.user,self.subfolder,self.exp_name)
         print(self.exp_dir)
 
-        if os.path.exists('{}/ensemble'.format(self.exp_dir)):
+        if (os.path.exists('{}/ensemble'.format(self.exp_dir)) or 
+            os.path.exists('{}/pp_ensemble'.format(self.exp_dir)) or 
+            os.path.exists('{}/ens_01'.format(self.exp_dir)) or 
+            os.path.exists('{}/pp_ens_01'.format(self.exp_dir))):
             self.ensemble = True
-            ensemble_done = sorted(glob.glob('{}/ensemble/*.done'.format(self.exp_dir)))
-            self.years = [int(done.split('/')[-1].split('.')[0][0:4]) for done in ensemble_done]
-
-        elif os.path.exists('{}/ens_01'.format(self.exp_dir)):
-            self.ensemble = True
-            ens_01_done = sorted(glob.glob('{}/ens_01/*.done'.format(self.exp_dir)))
-            self.years = [int(done.split('/')[-1].split('.')[0][0:4]) for done in ens_01_done]
-
         else:
             self.ensemble = False
-            history_files = sorted(glob.glob('{}/history/*.nc.tar'.format(self.exp_dir)))
-            self.years = [int(file.split('/')[-1].split('.')[0][0:4]) for file in history_files]
 
+        if 'years' in dict:
+            self.years = dict['years']
+        else:
+            if os.path.exists('{}/ensemble'.format(self.exp_dir)):
+                ensemble_done = sorted(glob.glob('{}/ensemble/*.done'.format(self.exp_dir)))
+                self.years = [int(done.split('/')[-1].split('.')[0][0:4]) for done in ensemble_done]
+
+            elif os.path.exists('{}/ens_01'.format(self.exp_dir)) or os.path.exists('{}/pp_ens_01'.format(self.exp_dir)):
+                ens_01_done = sorted(glob.glob('{}/ens_01/*.done'.format(self.exp_dir)))
+                self.years = [int(done.split('/')[-1].split('.')[0][0:4]) for done in ens_01_done]
+
+            else:
+                history_files = sorted(glob.glob('{}/history/*.nc.tar'.format(self.exp_dir)))
+                self.years = [int(file.split('/')[-1].split('.')[0][0:4]) for file in history_files]
+                
         if len(self.years) == self.years[-1] - self.years[0] + 1:
             self.year_start = self.years[0]
             self.year_end = self.years[-1]
@@ -55,7 +65,7 @@ class Exp:
         if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
 
-        self.read_ens = dict.get('read_ens', False)
+        self.read_ens = read_ens
         self.ens_member = []
         if self.ensemble:
             self.pp_ensemble = os.path.exists('{}/pp_ensemble'.format(self.exp_dir))
@@ -63,7 +73,8 @@ class Exp:
                 self.ens_member.append(Member('{}/pp_ensemble'.format(self.exp_dir)))
 
             self.pp_ens = os.path.exists('{}/pp_ens_01'.format(self.exp_dir))
-            self.ensemble_size = len(sorted(glob.glob('{}/ens_??'.format(self.exp_dir))))
+            self.ensemble_size = max(len(sorted(glob.glob('{}/ens_??'.format(self.exp_dir)))),
+                                     len(sorted(glob.glob('{}/pp_ens_??'.format(self.exp_dir)))))
             if self.pp_ens and self.read_ens:
                 for i in range(self.ensemble_size):
                     self.ens_member.append(Member('{}/pp_ens_{:02d}'.format(self.exp_dir,i+1)))
@@ -79,8 +90,12 @@ class Exp:
     def get_ensemble_size(self):
         return self.ensemble_size
         
-    def get_component_names(self, ensemble_number=0):
-        return self.ens_member[ensemble_number].component_names
+    def get_component_names(self, type=[], ensemble_number=0):
+        if type:
+            comps = [comp for comp in self.ens_member[ensemble_number].component_names if comp.split('_')[0] in type]
+        else:
+            comps = self.ens_member[ensemble_number].component_names
+        return comps
     
     def get_ts_freq(self, component_name, ensemble_number=0):
         return self.ens_member[ensemble_number].components[component_name].ts_freq
@@ -97,19 +112,88 @@ class Exp:
             files = [file for file in files if int(file.split('/')[-1].split('.')[-3][0:4]) in years]
         return files
     
+    def get_ts_files_vftmp(self, component_name, freq, variable_name, years=[], ensemble_number=0):
+        files = self.ens_member[ensemble_number].components[component_name].ts_files[freq][variable_name]
+        if len(years) > 0:
+            files = [file for file in files if int(file.split('/')[-1].split('.')[-3][0:4]) in years]
+        for file in files:
+            vftmp_file = file.replace(arch_dir,vftmp_dir)
+            if os.path.exists(vftmp_file):
+                files[files.index(file)] = vftmp_file
+            else:
+                raise ValueError('File {} does not exist in vftmp'.format(vftmp_file))
+        return files
+    
     def get_ts_ds(self, component_name, freq, variable_name, years=[], ensemble_number=0):
-        ds = xr.open_mfdataset(self.get_ts_files(component_name, freq, variable_name, years, ensemble_number))
+        try:
+            ds = xr.open_mfdataset(self.get_ts_files_vftmp(component_name, freq, variable_name, years, ensemble_number))
+            print('Using vftmp files')
+        except:
+            ds = xr.open_mfdataset(self.get_ts_files(component_name, freq, variable_name, years, ensemble_number))
+            print('Using archive files')
+        return ds
+    
+    def get_ts_files_ens(self, component_name, freq, variable_name, years=[], ensemble_numbers=[]):
+        if ensemble_numbers == []:
+            ensemble_numbers = range(1,self.ensemble_size+1)
+        files = []
+        for ensemble_number in ensemble_numbers:
+            ens_files = self.ens_member[ensemble_number].components[component_name].ts_files[freq][variable_name]
+            if len(years) > 0:
+                ens_files = [file for file in ens_files if int(file.split('/')[-1].split('.')[-3][0:4]) in years]
+            files.append(ens_files)
+        return files
+    
+    def get_ts_ds_ens(self, component_name, freq, variable_name, years=[], ensemble_numbers=[]):
+        if ensemble_numbers == []:
+            ensemble_numbers = range(1,self.ensemble_size+1)
+        try:
+            ds = xr.open_mfdataset(self.get_ts_files_ens_vftmp(component_name, freq, variable_name, years, ensemble_numbers),
+                               concat_dim=['ens','time'], combine='nested')
+            print('Using vftmp files')
+        except:
+            ds = xr.open_mfdataset(self.get_ts_files_ens(component_name, freq, variable_name, years, ensemble_numbers),
+                                concat_dim=['ens','time'], combine='nested')
+            print('Using archive files')
+        ds["ens"] = ("ens", ensemble_numbers)
         return ds
     
     def get_av_files(self, component_name, freq, years=[], ensemble_number=0):
         files = self.ens_member[ensemble_number].components[component_name].av_files[freq]
         if len(years) > 0:
             files = [file for file in files if int(file.split('/')[-1].split('.')[-3][0:4]) in years]
-
         return files
     
     def get_av_ds(self, component_name, freq, years=[], ensemble_number=0):
         ds = xr.open_mfdataset(self.get_av_files(component_name, freq, years, ensemble_number))
+        return ds
+    
+    def get_ts_files_ens_vftmp(self, component_name, freq, variable_name, years=[], ensemble_numbers=[]):
+        if ensemble_numbers == []:
+            ensemble_numbers = range(1,self.ensemble_size+1)
+
+        files = []
+        for ensemble_number in ensemble_numbers:
+            ens_files = self.ens_member[ensemble_number].components[component_name].ts_files[freq][variable_name]
+            if len(years) > 0:
+                ens_files = [file for file in ens_files if int(file.split('/')[-1].split('.')[-3][0:4]) in years]
+            for file in ens_files:
+                vftmp_file = file.replace(arch_dir,vftmp_dir)
+                if os.path.exists(vftmp_file):
+                    ens_files[ens_files.index(file)] = vftmp_file
+                else:
+                    raise ValueError('File {} does not exist in vftmp'.format(vftmp_file))
+                    
+            files.append(ens_files)
+
+        return files
+    
+    def get_ts_ds_ens_vftmp(self, component_name, freq, variable_name, years=[], ensemble_numbers=[]):
+        if ensemble_numbers == []:
+            ensemble_numbers = range(1,self.ensemble_size+1)
+        ds = xr.open_mfdataset(self.get_ts_files_ens_vftmp(component_name, freq, variable_name, years, ensemble_numbers),
+                               concat_dim=['ens','time'], combine='nested')
+        ds["ens"] = ("ens", ensemble_numbers)
         return ds
     
 class Member:
